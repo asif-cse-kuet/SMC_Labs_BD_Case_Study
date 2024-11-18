@@ -1,0 +1,190 @@
+import asyncio
+import json
+from libp2p import new_node
+from libp2p.peer.peerinfo import info_from_p2p_addr
+from multiaddr import Multiaddr
+
+# Constants for message types
+DISCOVERY_REQUEST = "DISCOVERY_REQUEST"
+DISCOVERY_RESPONSE = "DISCOVERY_RESPONSE"
+CONNECT_REQUEST = "CONNECT_REQUEST"
+CONNECT_ACK = "CONNECT_ACK"
+TASK_ASSIGN = "TASK_ASSIGN"
+TASK_COMPLETE = "TASK_COMPLETE"
+DISCONNECT_REQUEST = "DISCONNECT_REQUEST"
+DISCONNECT_ACK = "DISCONNECT_ACK"
+
+# Node class to handle peer-to-peer networking with libp2p
+class Node:
+    def __init__(self, task_type):
+        self.task_type = task_type  # Type of task this node can handle (e.g., 'A', 'B', 'C')
+        self.peers = {}  # Dictionary to store connected peers by task type
+
+    async def start(self):
+        # Initialize the libp2p node
+        self.node = await new_node()
+        await self.node.listen("/ip4/0.0.0.0/tcp/0")  # Bind to any available IP and port
+        print(f"Node started with Peer ID: {self.node.get_id()}")
+
+        # Start handling incoming messages
+        asyncio.ensure_future(self.handle_incoming())
+        await asyncio.sleep(1)
+
+    async def handle_incoming(self):
+        # Main loop to handle incoming messages
+        async for stream in self.node.new_stream():
+            message = await stream.read()  # Read the incoming message
+            data = json.loads(message.decode())  # Decode JSON data
+            msg_type = data.get("type")
+
+            # Route to appropriate handler based on message type
+            if msg_type == DISCOVERY_REQUEST:
+                await self.handle_discovery_request(data, stream)
+            elif msg_type == DISCOVERY_RESPONSE:
+                await self.handle_discovery_response(data)
+            elif msg_type == CONNECT_REQUEST:
+                await self.handle_connect_request(stream)
+            elif msg_type == CONNECT_ACK:
+                await self.handle_connect_ack(data)
+            elif msg_type == TASK_ASSIGN:
+                await self.handle_task_assign(data, stream)
+            elif msg_type == TASK_COMPLETE:
+                await self.handle_task_complete(data)
+            elif msg_type == DISCONNECT_REQUEST:
+                await self.handle_disconnect_request(stream)
+            elif msg_type == DISCONNECT_ACK:
+                await self.handle_disconnect_ack(data)
+            await stream.reset()
+
+    async def broadcast_discovery(self, peer_addr):
+        # Send discovery request to known peer address
+        peer_info = info_from_p2p_addr(Multiaddr(peer_addr))
+        stream = await self.node.new_stream(peer_info.peer_id)
+        message = json.dumps({"type": DISCOVERY_REQUEST, "task_type": self.task_type})
+        await stream.write(message.encode())
+
+    async def handle_discovery_request(self, message, stream):
+        # Respond to a discovery request if the task type matches
+        task_type = message.get("task_type")
+        if task_type == self.task_type:
+            response = json.dumps({
+                "type": DISCOVERY_RESPONSE,
+                "peer_id": self.node.get_id(),
+                "task_type": self.task_type
+            })
+            await stream.write(response.encode())
+
+    async def handle_discovery_response(self, message):
+        # Register peer details received in the discovery response
+        peer_id = message.get("peer_id")
+        task_type = message.get("task_type")
+        if task_type not in self.peers:
+            self.peers[task_type] = peer_id
+
+    async def connect_to_peer(self, peer_id):
+        # Send a connection request to the specified peer ID
+        stream = await self.node.new_stream(peer_id)
+        message = json.dumps({"type": CONNECT_REQUEST})
+        await stream.write(message.encode())
+        await stream.reset()
+
+    async def handle_connect_request(self, stream):
+        # Handle an incoming connection request and acknowledge it
+        ack_message = json.dumps({"type": CONNECT_ACK})
+        await stream.write(ack_message.encode())
+
+    async def handle_connect_ack(self, message):
+        # Process the connection acknowledgment
+        print("Connection acknowledged by peer.")
+
+    async def assign_task(self, peer_id, task_data):
+        # Send a task assignment to a specified peer ID
+        stream = await self.node.new_stream(peer_id)
+        message = json.dumps({"type": TASK_ASSIGN, "task_data": task_data})
+        await stream.write(message.encode())
+        await stream.reset()
+
+    async def handle_task_assign(self, message, stream):
+        # Execute the assigned task and notify the assigning peer
+        task_data = message.get("task_data")
+        print(f"Executing task: {task_data}")
+        await asyncio.sleep(2)  # Simulate task completion
+        complete_message = json.dumps({"type": TASK_COMPLETE, "task_type": self.task_type})
+        await stream.write(complete_message.encode())
+
+    async def handle_task_complete(self, message):
+        # Handle notification of task completion by a peer
+        print(f"Task completed by peer with task type {message.get('task_type')}")
+
+    async def disconnect_from_peer(self, peer_id):
+        # Send a disconnect request to a specified peer ID
+        stream = await self.node.new_stream(peer_id)
+        message = json.dumps({"type": DISCONNECT_REQUEST})
+        await stream.write(message.encode())
+        await stream.reset()
+
+    async def handle_disconnect_request(self, stream):
+        # Handle an incoming disconnect request and acknowledge it
+        ack_message = json.dumps({"type": DISCONNECT_ACK})
+        await stream.write(ack_message.encode())
+
+    async def handle_disconnect_ack(self, message):
+        # Handle acknowledgment of disconnection from a peer
+        print("Disconnected from peer.")
+
+# Helper function to load tasks from a text file and parse required nodes
+def load_tasks_from_file(filename):
+    with open(filename, 'r') as file:
+        task_list = file.read().strip().split()
+
+    task_order = []
+    task_count = {}
+
+    # Parse tasks from file content
+    for task in task_list:
+        task_type = task[0]  # First letter of task indicates the type
+        task_order.append((task_type, task))
+        task_count[task_type] = task_count.get(task_type, 0) + 1
+
+    # Identify required task types (types with counts greater than 1)
+    required_task_types = [task_type for task_type, count in task_count.items() if count > 1]
+
+    return task_order, required_task_types
+
+# Main function to set up and run the P2P node
+async def main():
+    task_type = "A"  # Assume this node handles 'A' type tasks
+
+    # Load tasks and determine required nodes from the file
+    tasks, required_task_types = load_tasks_from_file("tasks.txt")
+
+    # Start the node and begin networking operations
+    node = Node(task_type)
+    await node.start()
+
+    # Step 1: Discover peers for required task types
+    print("Discovering peers...")
+    # Replace with a known peer's multiaddr
+    await node.broadcast_discovery("/ip4/127.0.0.1/tcp/4001/p2p/<peer_id>")
+    await asyncio.sleep(2)  # Wait for discovery responses
+
+    # Step 2: Initiate connections with required peers
+    print("Initiating connections...")
+    for task_type in required_task_types:
+        if task_type in node.peers:
+            await node.connect_to_peer(node.peers[task_type])
+
+    # Step 3: Assign tasks in order
+    print("Assigning tasks...")
+    for task_type, task_data in tasks:
+        if task_type in node.peers:
+            await node.assign_task(node.peers[task_type], task_data)
+            await asyncio.sleep(3)  # Allow some time for task completion
+
+    # Step 4: Terminate connections
+    print("Terminating connections...")
+    for peer_id in node.peers.values():
+        await node.disconnect_from_peer(peer_id)
+
+# Run the main function
+asyncio.run(main())
